@@ -1,0 +1,119 @@
+#include <iostream>
+#include <vector>
+#include <tuple>
+#include <string>
+#include <unordered_map>
+#include "Graph.hpp"
+namespace clsa {
+struct HRect {
+    int x, y, w, h;
+    bool operator==(const HRect &rhs) const {return x==rhs.x&&y==rhs.y&&w==rhs.w&&h==rhs.h;}
+} ;
+struct Rect {
+    int w, h;
+    bool operator==(const Rect &rhs) const {return w==rhs.w&&h==rhs.h;}
+} ;
+struct Conv2d {
+    Rect stride, pad, krnlShape;
+    bool operator==(const Conv2d &rhs) const {return stride==rhs.stride&&pad==rhs.pad&&krnlShape==rhs.krnlShape;}
+    Rect ofmShape(Rect ifmShape) const {
+        int h = 1 + (ifmShape.h - krnlShape.h + 2 * pad.h) / stride.h;
+        int w = 1 + (ifmShape.w - krnlShape.w + 2 * pad.w) / stride.w;
+        return {h, w};
+    }
+} ;
+struct Layer {
+    std::string layerName;
+    Conv2d conv;
+    bool operator==(const Layer &rhs) const {return layerName==rhs.layerName;}
+} ;
+struct LayerNode {
+    Layer layer;
+    Rect divSz;
+    int x, y;
+    bool operator==(const LayerNode &rhs) const {return layer==rhs.layer&&divSz==rhs.divSz&&x==rhs.x&&y==rhs.y;}
+} ;
+std::ostream &operator<<(std::ostream &ofs, const LayerNode &node) {
+    ofs<<"( "<<node.layer.layerName<<": ("<<node.x<<", "<<node.y<<") )";
+    return ofs;
+}
+struct LayerNodeHash {
+    size_t operator()(const LayerNode &node) const {
+        size_t seed = 0;
+        std::hash<std::string> string_hasher;
+        seed ^= string_hasher(node.layer.layerName) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= std::hash<int>{}(node.layer.conv.stride.w) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= std::hash<int>{}(node.layer.conv.stride.h) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= std::hash<int>{}(node.layer.conv.pad.w) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= std::hash<int>{}(node.layer.conv.pad.h) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= std::hash<int>{}(node.layer.conv.krnlShape.w) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= std::hash<int>{}(node.layer.conv.krnlShape.h) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= std::hash<int>{}(node.x) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= std::hash<int>{}(node.y) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        return seed;
+    }
+} ;
+using LayerConf = std::vector<Layer>;
+HRect OFMRect2IFM(HRect oRect, Conv2d conv) {
+    int x1=oRect.x, y1=oRect.y, x2=oRect.x+oRect.w-1, y2=oRect.y+oRect.h-1;
+    HRect ans;
+    ans.x = x1*conv.stride.w - (conv.krnlShape.w-1)/2;
+    ans.y = y1*conv.stride.h - (conv.krnlShape.h-1)/2;
+    ans.w = (x2-x1)*conv.stride.w+conv.krnlShape.w;
+    ans.h = (y2-y1)*conv.stride.h+conv.krnlShape.h;
+    return ans;
+}
+struct LayerNodeOrd {
+    using OrdT = std::unordered_map<LayerNode, int, LayerNodeHash> ;
+    LayerNodeOrd(const LayerConf &conf, Rect ifmShape, Rect divSz): m_conf{conf}, m_ifmShape{ifmShape}, m_divSz{divSz} {}
+    OrdT get() {
+        if (m_g.empty()) buildGraph();
+        return m_g.topoSort();
+    }
+private:
+    const LayerConf &m_conf;
+    Graph<LayerNode, LayerNodeHash> m_g;
+    Rect m_ifmShape;
+    Rect m_divSz;
+    void buildGraph() {
+        Rect curShape = m_ifmShape;
+        for (int idx=0; idx<m_conf.size(); ++idx) {
+            const auto &ofmConf = m_conf[idx];
+            Rect ofmShape = ofmConf.conv.ofmShape(curShape);
+            for (int i=0; i*m_divSz.h<ofmShape.h; ++i)
+                for (int j=0; j*m_divSz.w<ofmShape.w; ++j) {
+                    HRect ofmRect = {j*m_divSz.w, i*m_divSz.h, m_divSz.w, m_divSz.h};
+                    HRect ifmRect = OFMRect2IFM(ofmRect, ofmConf.conv);
+                    LayerNode ofmNode = {m_conf[idx], m_divSz, j, i};
+                    int x0 = ifmRect.x/m_divSz.w, x1 = (ifmRect.x+ifmRect.w-1)/m_divSz.w;
+                    int y0 = ifmRect.y/m_divSz.h, y1 = (ifmRect.y+ifmRect.h-1)/m_divSz.h;
+                    for (int x=x0; x<=x1; ++x)
+                        for (int y=y0; y<=y1; ++y) {
+                            LayerNode ifmNode = {idx>0?m_conf[idx-1]:Layer{"input"}, m_divSz, x, y};
+                            m_g.add(ifmNode, ofmNode);
+                        }
+                }
+            curShape = ofmShape;
+        }
+    }
+} ;
+}
+int main() {
+    using namespace clsa;
+    LayerConf conf = {
+        {"Conv1", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}},
+        {"Conv2", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}},
+        {"MaxPool1", {.stride={2,2}, .pad={0,0}, .krnlShape={2,2}}},
+        {"Conv3", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}},
+        {"Conv4", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}},
+        {"MaxPool2", {.stride={2,2}, .pad={0,0}, .krnlShape={2,2}}},
+        {"Conv5", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}},
+        {"Conv6", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}},
+        {"Conv7", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}}
+    };
+    auto ord = LayerNodeOrd(conf, {28, 28}, {3, 3}).get();
+    for (auto [k, v]: ord) {
+        std::cout<<k<<": "<<v<<"\n";
+    }
+}
+
