@@ -80,19 +80,28 @@ private:
         for (int idx=0; idx<m_conf.size(); ++idx) {
             const auto &ofmConf = m_conf[idx];
             Rect ofmShape = ofmConf.conv.ofmShape(curShape);
+            int ifmBoundX = curShape.w/m_divSz.w, ifmBoundY = curShape.h/m_divSz.h;
             for (int i=0; i*m_divSz.h<ofmShape.h; ++i)
                 for (int j=0; j*m_divSz.w<ofmShape.w; ++j) {
                     HRect ofmRect = {j*m_divSz.w, i*m_divSz.h, m_divSz.w, m_divSz.h};
+                    if (i>0&&j==0) {
+                        int jM = (ofmShape.w/m_divSz.w);
+                        m_g.add({m_conf[idx], m_divSz, jM, i-1}, {m_conf[idx], m_divSz, 0, i});
+                    };
+                    if (j>0) {
+                        m_g.add({m_conf[idx], m_divSz, j-1, i}, {m_conf[idx], m_divSz, j, i});
+                    }
                     HRect ifmRect = OFMRect2IFM(ofmRect, ofmConf.conv);
                     LayerNode ofmNode = {m_conf[idx], m_divSz, j, i};
-                    int x0 = ifmRect.x/m_divSz.w, x1 = (ifmRect.x+ifmRect.w-1)/m_divSz.w;
-                    int y0 = ifmRect.y/m_divSz.h, y1 = (ifmRect.y+ifmRect.h-1)/m_divSz.h;
+                    int x0 = std::max(0, ifmRect.x/m_divSz.w), x1 = std::min(ifmBoundX, (ifmRect.x+ifmRect.w-1)/m_divSz.w);
+                    int y0 = std::max(0, ifmRect.y/m_divSz.h), y1 = std::min(ifmBoundY, (ifmRect.y+ifmRect.h-1)/m_divSz.h);
                     for (int x=x0; x<=x1; ++x)
                         for (int y=y0; y<=y1; ++y) {
                             LayerNode ifmNode = {idx>0?m_conf[idx-1]:Layer{"input"}, m_divSz, x, y};
                             m_g.add(ifmNode, ofmNode);
                         }
                 }
+            std::cout<<"curShape: ("<<curShape.w<<", "<<curShape.h<<")\n";
             curShape = ofmShape;
         }
     }
@@ -112,8 +121,11 @@ int main() {
         {"Conv7", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}}
     };
     auto ord = LayerNodeOrd(conf, {28, 28}, {3, 3}).get();
-    for (auto [k, v]: ord) {
-        std::cout<<k<<": "<<v<<"\n";
-    }
+    std::vector<std::pair<int, LayerNode>> ordVec;
+    for (const auto [k, v]: ord)
+        ordVec.push_back({v, k});
+    std::sort(ordVec.begin(), ordVec.end(), [](const auto &lhs, const auto &rhs){return lhs.first<rhs.first;});
+    for (const auto [k, v]: ordVec)
+        std::cout<<v<<": "<<k<<"\n";
 }
 
