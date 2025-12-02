@@ -65,8 +65,9 @@ HRect OFMRect2IFM(HRect oRect, Conv2d conv) {
 }
 struct LayerNodeOrd {
     using OrdT = std::unordered_map<LayerNode, int, LayerNodeHash> ;
-    LayerNodeOrd(const LayerConf &conf, Rect ifmShape, Rect divSz): m_conf{conf}, m_ifmShape{ifmShape}, m_divSz{divSz} {}
+    LayerNodeOrd(const LayerConf &conf, Rect ifmShape, Rect divSz, int wdup=1): m_conf{conf}, m_ifmShape{ifmShape}, m_divSz{divSz}, m_wdup{wdup} {}
     OrdT get() {
+        std::cout<<"WDup: "<<m_wdup<<"\n";
         if (m_g.empty()) buildGraph();
         return m_g.topoSort();
     }
@@ -75,16 +76,19 @@ private:
     Graph<LayerNode, LayerNodeHash> m_g;
     Rect m_ifmShape;
     Rect m_divSz;
+    int m_wdup;
     void buildGraph() {
         Rect curShape = m_ifmShape;
         for (int idx=0; idx<m_conf.size(); ++idx) {
             const auto &ofmConf = m_conf[idx];
             Rect ofmShape = ofmConf.conv.ofmShape(curShape);
             int ifmBoundX = curShape.w/m_divSz.w, ifmBoundY = curShape.h/m_divSz.h;
+            int wdupBlk = (ofmShape.h/m_divSz.h+1+m_wdup-1)/m_wdup;
+            std::cout<<"BlkSz: "<<wdupBlk<<"\n";
             for (int i=0; i*m_divSz.h<ofmShape.h; ++i)
                 for (int j=0; j*m_divSz.w<ofmShape.w; ++j) {
                     HRect ofmRect = {j*m_divSz.w, i*m_divSz.h, m_divSz.w, m_divSz.h};
-                    if (i>0&&j==0) {
+                    if (i>0&&j==0&&i%wdupBlk) {
                         int jM = (ofmShape.w/m_divSz.w);
                         m_g.add({m_conf[idx], m_divSz, jM, i-1}, {m_conf[idx], m_divSz, 0, i});
                     };
@@ -120,11 +124,15 @@ int main() {
         {"Conv6", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}},
         {"Conv7", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}}
     };
-    auto ord = LayerNodeOrd(conf, {28, 28}, {3, 3}).get();
+    auto ord = LayerNodeOrd(conf, {28, 28}, {3, 3}, 2).get();
     std::vector<std::pair<int, LayerNode>> ordVec;
     for (const auto [k, v]: ord)
         ordVec.push_back({v, k});
     std::sort(ordVec.begin(), ordVec.end(), [](const auto &lhs, const auto &rhs){return lhs.first<rhs.first;});
+    if (!ordVec.empty()) {
+        std::cout<<"Total time: "<<ordVec[ordVec.size()-1].first<<"\n";
+    }
+    std::cout<<"Schedule Table: \n";
     for (const auto [k, v]: ordVec)
         std::cout<<v<<": "<<k<<"\n";
 }
