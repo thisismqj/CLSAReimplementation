@@ -90,11 +90,9 @@ struct LayerNodeOrd {
         if (m_g.empty()) buildGraph();
         return m_g.topoSort();
     }
-    
     int getCyclePerDiv() {
         return (m_divSz.w * m_divSz.h+m_wdup-1) / m_wdup;
     }
-    
 private:
     const LayerConf &m_conf;
     Graph<LayerNode, LayerNodeHash> m_g;
