@@ -19,7 +19,7 @@ struct Conv2d {
     Rect ofmShape(Rect ifmShape) const {
         int h = 1 + (ifmShape.h - krnlShape.h + 2 * pad.h) / stride.h;
         int w = 1 + (ifmShape.w - krnlShape.w + 2 * pad.w) / stride.w;
-        return {h, w};
+        return {w, h};
     }
 } ;
 struct Layer {
@@ -65,11 +65,15 @@ HRect OFMRect2IFM(HRect oRect, Conv2d conv) {
 }
 struct LayerNodeOrd {
     using OrdT = std::unordered_map<LayerNode, int, LayerNodeHash> ;
-    LayerNodeOrd(const LayerConf &conf, Rect ifmShape, Rect divSz, int wdup=1): m_conf{conf}, m_ifmShape{ifmShape}, m_divSz{divSz}, m_wdup{wdup} {}
+    LayerNodeOrd(const LayerConf &conf, Rect ifmShape, Rect divSz, int wdup=1, bool sdk=0, bool clsa=1)
+    : m_conf{conf}, m_ifmShape{ifmShape}, m_divSz{divSz}, m_wdup{wdup}, m_SDK{sdk}, m_CLSA{clsa} {}
     OrdT get() {
         std::cout<<"WDup: "<<m_wdup<<"\n";
         if (m_g.empty()) buildGraph();
         return m_g.topoSort();
+    }
+    int getCyclePerDiv() {
+        return m_divSz.w*m_divSz.h/m_wdup;
     }
 private:
     const LayerConf &m_conf;
@@ -77,6 +81,9 @@ private:
     Rect m_ifmShape;
     Rect m_divSz;
     int m_wdup;
+    int m_maxOrd;
+    bool m_SDK=0;
+    bool m_CLSA=1;
     void buildGraph() {
         Rect curShape = m_ifmShape;
         for (int idx=0; idx<m_conf.size(); ++idx) {
@@ -84,27 +91,35 @@ private:
             Rect ofmShape = ofmConf.conv.ofmShape(curShape);
             int ifmBoundX = curShape.w/m_divSz.w, ifmBoundY = curShape.h/m_divSz.h;
             int wdupBlk = (ofmShape.h/m_divSz.h+1+m_wdup-1)/m_wdup;
-            std::cout<<"BlkSz: "<<wdupBlk<<"\n";
-            for (int i=0; i*m_divSz.h<ofmShape.h; ++i)
+            if (!m_SDK) std::cout<<"BlkSz: "<<wdupBlk<<"\n";
+            for (int i=0; i*m_divSz.h<ofmShape.h; ++i) {
                 for (int j=0; j*m_divSz.w<ofmShape.w; ++j) {
                     HRect ofmRect = {j*m_divSz.w, i*m_divSz.h, m_divSz.w, m_divSz.h};
-                    if (i>0&&j==0&&i%wdupBlk) {
+                    if (i>0&&j==0&&(!m_CLSA||m_SDK||i%wdupBlk)) {
                         int jM = (ofmShape.w/m_divSz.w);
                         m_g.add({m_conf[idx], m_divSz, jM, i-1}, {m_conf[idx], m_divSz, 0, i});
                     };
                     if (j>0) {
                         m_g.add({m_conf[idx], m_divSz, j-1, i}, {m_conf[idx], m_divSz, j, i});
                     }
-                    HRect ifmRect = OFMRect2IFM(ofmRect, ofmConf.conv);
-                    LayerNode ofmNode = {m_conf[idx], m_divSz, j, i};
-                    int x0 = std::max(0, ifmRect.x/m_divSz.w), x1 = std::min(ifmBoundX, (ifmRect.x+ifmRect.w-1)/m_divSz.w);
-                    int y0 = std::max(0, ifmRect.y/m_divSz.h), y1 = std::min(ifmBoundY, (ifmRect.y+ifmRect.h-1)/m_divSz.h);
-                    for (int x=x0; x<=x1; ++x)
-                        for (int y=y0; y<=y1; ++y) {
-                            LayerNode ifmNode = {idx>0?m_conf[idx-1]:Layer{"input"}, m_divSz, x, y};
-                            m_g.add(ifmNode, ofmNode);
-                        }
+                    if (m_CLSA) {
+                        HRect ifmRect = OFMRect2IFM(ofmRect, ofmConf.conv);
+                        LayerNode ofmNode = {m_conf[idx], m_divSz, j, i};
+                        int x0 = std::max(0, ifmRect.x/m_divSz.w), x1 = std::min(ifmBoundX, (ifmRect.x+ifmRect.w-1)/m_divSz.w);
+                        int y0 = std::max(0, ifmRect.y/m_divSz.h), y1 = std::min(ifmBoundY, (ifmRect.y+ifmRect.h-1)/m_divSz.h);
+                        for (int x=x0; x<=x1; ++x)
+                            for (int y=y0; y<=y1; ++y) {
+                                LayerNode ifmNode = {idx>0?m_conf[idx-1]:Layer{"input"}, m_divSz, x, y};
+                                m_g.add(ifmNode, ofmNode);
+                            }
+                    }
                 }
+            }
+            if (!m_CLSA) {
+                LayerNode ifmNode = {idx>0?m_conf[idx-1]:Layer{"input"}, m_divSz, ifmBoundX, ifmBoundY};
+                LayerNode ofmNode = {m_conf[idx], m_divSz, 0, 0};
+                m_g.add(ifmNode, ofmNode);
+            }
             std::cout<<"curShape: ("<<curShape.w<<", "<<curShape.h<<")\n";
             curShape = ofmShape;
         }
@@ -113,6 +128,7 @@ private:
 }
 int main() {
     using namespace clsa;
+    // 改成从配置文件读入
     LayerConf conf = {
         {"Conv1", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}},
         {"Conv2", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}},
@@ -124,16 +140,22 @@ int main() {
         {"Conv6", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}},
         {"Conv7", {.stride={1,1}, .pad={1,1}, .krnlShape={3,3}}}
     };
-    auto ord = LayerNodeOrd(conf, {28, 28}, {3, 3}, 2).get();
+    // ordCalc的初始化参数也改成从配置文件读入
+    // LayerNodeOrd(const LayerConf &conf, Rect ifmShape, Rect divSz, int wdup=1, bool sdk=0, bool clsa=1)
+    auto ordCalc = LayerNodeOrd(conf, {224, 224}, {3, 3}, 2, 1, 0);
+    auto ord = ordCalc.get();
     std::vector<std::pair<int, LayerNode>> ordVec;
     for (const auto [k, v]: ord)
         ordVec.push_back({v, k});
     std::sort(ordVec.begin(), ordVec.end(), [](const auto &lhs, const auto &rhs){return lhs.first<rhs.first;});
     if (!ordVec.empty()) {
-        std::cout<<"Total time: "<<ordVec[ordVec.size()-1].first<<"\n";
+        int cyclePerDiv = ordCalc.getCyclePerDiv();
+        std::cout<<"Cycle per div: "<< cyclePerDiv<<"\n";
+        std::cout<<"Total cycles: "<<ordVec[ordVec.size()-1].first*cyclePerDiv<<"\n";
     }
-    std::cout<<"Schedule Table: \n";
+    std::cout<<"Schedule Table (Node, Ord): \n";
     for (const auto [k, v]: ordVec)
-        std::cout<<v<<": "<<k<<"\n";
+        if (v.layer.layerName!="input")
+            std::cout<<v<<": "<<k<<"\n";
 }
 
